@@ -1099,3 +1099,377 @@
     </script>
 </body>
 </html>
+
+
+from flask import Flask, request, jsonify, session, render_template_string
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, timedelta
+import logging
+import os
+
+app = Flask(__name__)
+app.secret_key = 'secret_key_12345_change_in_production'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://kino_user:password123@localhost/kino_db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+
+db = SQLAlchemy(app)
+
+# Logging
+logging.basicConfig(level=logging.DEBUG)
+
+# Database models
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    telegram_username = db.Column(db.String(100), unique=True, nullable=False)
+    password_hash = db.Column(db.String(200), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False)
+    subscription_ends = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Movie(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text)
+    telegram_file_id = db.Column(db.String(300))
+    poster_url = db.Column(db.String(300))
+    video_url = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_active = db.Column(db.Boolean, default=True)
+
+class Story(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    movie_id = db.Column(db.Integer, db.ForeignKey('movie.id'))
+    video_url = db.Column(db.String(500))
+    preview_url = db.Column(db.String(300))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, default=datetime.utcnow() + timedelta(days=7))
+    is_active = db.Column(db.Boolean, default=True)
+
+class Payment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    amount = db.Column(db.Integer)  # Stars miqdori
+    months = db.Column(db.Integer)
+    status = db.Column(db.String(50), default='pending')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+# Create tables and admin user
+with app.app_context():
+    db.create_all()
+    
+    # Create admin if not exists
+    admin = User.query.filter_by(telegram_username='Shodiyor1403').first()
+    if not admin:
+        admin = User(
+            telegram_username='Shodiyor1403',
+            password_hash=generate_password_hash('jhfdsbibi55465'),
+            is_admin=True,
+            subscription_ends=datetime.utcnow() + timedelta(days=3650)
+        )
+        db.session.add(admin)
+        
+        # Add sample movies
+        sample_movies = [
+            Movie(
+                title="Avatar 2: Suv Yo'li",
+                description="Jeyk Salili va Neytiri oilasi qilgan kurash",
+                poster_url="https://via.placeholder.com/300x450/6c5ce7/ffffff?text=Avatar+2",
+                video_url="https://example.com/avatar2.mp4"
+            ),
+            Movie(
+                title="John Wick 4",
+                description="Jon Vik o'limdan qaytib, katta janglarga tayyor",
+                poster_url="https://via.placeholder.com/300x450/00b894/ffffff?text=John+Wick+4",
+                video_url="https://example.com/johnwick4.mp4"
+            ),
+            Movie(
+                title="Oppenheimer",
+                description="Atom bombasini yaratgan olimning hayoti",
+                poster_url="https://via.placeholder.com/300x450/fdcb6e/000000?text=Oppenheimer",
+                video_url="https://example.com/oppenheimer.mp4"
+            )
+        ]
+        
+        for movie in sample_movies:
+            db.session.add(movie)
+        
+        db.session.commit()
+        
+        # Add sample stories
+        for movie in Movie.query.all():
+            story = Story(
+                movie_id=movie.id,
+                video_url=f"https://example.com/stories/{movie.id}.mp4",
+                preview_url=movie.poster_url
+            )
+            db.session.add(story)
+        
+        db.session.commit()
+
+# API Endpoints
+@app.route('/')
+def index():
+    return render_template_string(open('index.html', encoding='utf-8').read())
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    try:
+        data = request.json
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
+        
+        if not username or not password:
+            return jsonify({'success': False, 'error': 'Username va password kerak'}), 400
+        
+        if User.query.filter_by(telegram_username=username).first():
+            return jsonify({'success': False, 'error': 'Username band'}), 400
+        
+        user = User(
+            telegram_username=username,
+            password_hash=generate_password_hash(password),
+            subscription_ends=datetime.utcnow()  # No subscription initially
+        )
+        
+        db.session.add(user)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Ro\'yxatdan o\'tdingiz',
+            'user': {
+                'id': user.id,
+                'username': user.telegram_username,
+                'is_admin': user.is_admin
+            }
+        })
+        
+    except Exception as e:
+        logging.error(f"Register error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    try:
+        data = request.json
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
+        
+        user = User.query.filter_by(telegram_username=username).first()
+        
+        if user and check_password_hash(user.password_hash, password):
+            session['user_id'] = user.id
+            session['username'] = user.telegram_username
+            session['is_admin'] = user.is_admin
+            
+            return jsonify({
+                'success': True,
+                'message': 'Login muvaffaqiyatli',
+                'user': {
+                    'id': user.id,
+                    'username': user.telegram_username,
+                    'is_admin': user.is_admin,
+                    'has_subscription': user.subscription_ends > datetime.utcnow()
+                }
+            })
+        
+        return jsonify({'success': False, 'error': 'Login yoki parol noto\'g\'ri'}), 401
+        
+    except Exception as e:
+        logging.error(f"Login error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/movies')
+def get_movies():
+    try:
+        movies = Movie.query.filter_by(is_active=True).order_by(Movie.created_at.desc()).all()
+        
+        result = []
+        for movie in movies:
+            result.append({
+                'id': movie.id,
+                'title': movie.title,
+                'description': movie.description,
+                'poster_url': movie.poster_url,
+                'video_url': movie.video_url,
+                'year': movie.created_at.year
+            })
+        
+        return jsonify({'success': True, 'movies': result})
+        
+    except Exception as e:
+        logging.error(f"Get movies error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/stories')
+def get_stories():
+    try:
+        # Get stories from last 7 days
+        week_ago = datetime.utcnow() - timedelta(days=7)
+        stories = Story.query.filter(
+            Story.created_at >= week_ago,
+            Story.is_active == True
+        ).order_by(Story.created_at.desc()).limit(10).all()
+        
+        result = []
+        for story in stories:
+            movie = Movie.query.get(story.movie_id)
+            if movie:
+                result.append({
+                    'id': story.id,
+                    'movie_id': story.movie_id,
+                    'movie_title': movie.title,
+                    'preview_url': story.preview_url or movie.poster_url,
+                    'video_url': story.video_url,
+                    'created_at': story.created_at.isoformat(),
+                    'is_new': story.created_at > datetime.utcnow() - timedelta(hours=24)
+                })
+        
+        return jsonify({'success': True, 'stories': result})
+        
+    except Exception as e:
+        logging.error(f"Get stories error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/subscription/plans')
+def get_subscription_plans():
+    plans = [
+        {'id': 1, 'name': '1 Oy', 'price': 299, 'stars': 299, 'days': 30},
+        {'id': 2, 'name': '3 Oy', 'price': 799, 'stars': 799, 'days': 90},
+        {'id': 3, 'name': '1 Yil', 'price': 2999, 'stars': 2999, 'days': 365}
+    ]
+    return jsonify({'success': True, 'plans': plans})
+
+@app.route('/api/subscription/buy', methods=['POST'])
+def buy_subscription():
+    try:
+        data = request.json
+        user_id = session.get('user_id')
+        plan_id = data.get('plan_id')
+        
+        if not user_id:
+            return jsonify({'success': False, 'error': 'Login qilish kerak'}), 401
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'Foydalanuvchi topilmadi'}), 404
+        
+        # Plan logic (simulated)
+        plans = {
+            1: {'days': 30, 'price': 299},
+            2: {'days': 90, 'price': 799},
+            3: {'days': 365, 'price': 2999}
+        }
+        
+        if plan_id not in plans:
+            return jsonify({'success': False, 'error': 'Plan topilmadi'}), 404
+        
+        plan = plans[plan_id]
+        
+        # Update user subscription
+        if user.subscription_ends and user.subscription_ends > datetime.utcnow():
+            user.subscription_ends += timedelta(days=plan['days'])
+        else:
+            user.subscription_ends = datetime.utcnow() + timedelta(days=plan['days'])
+        
+        # Record payment
+        payment = Payment(
+            user_id=user.id,
+            amount=plan['price'],
+            months=plan['days'] // 30,
+            status='completed'
+        )
+        db.session.add(payment)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Obuna {plan["days"]} kunga aktivlashtirildi',
+            'subscription_ends': user.subscription_ends.isoformat()
+        })
+        
+    except Exception as e:
+        logging.error(f"Buy subscription error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/user/profile')
+def get_profile():
+    try:
+        user_id = session.get('user_id')
+        if not user_id:
+            return jsonify({'success': False, 'error': 'Login qilish kerak'}), 401
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'Foydalanuvchi topilmadi'}), 404
+        
+        # Get active subscription days
+        days_left = 0
+        if user.subscription_ends and user.subscription_ends > datetime.utcnow():
+            days_left = (user.subscription_ends - datetime.utcnow()).days
+        
+        return jsonify({
+            'success': True,
+            'user': {
+                'id': user.id,
+                'username': user.telegram_username,
+                'is_admin': user.is_admin,
+                'created_at': user.created_at.isoformat(),
+                'subscription_days_left': days_left,
+                'has_subscription': days_left > 0
+            }
+        })
+        
+    except Exception as e:
+        logging.error(f"Get profile error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/movies/add', methods=['POST'])
+def admin_add_movie():
+    try:
+        if not session.get('is_admin'):
+            return jsonify({'success': False, 'error': 'Admin huquqi kerak'}), 403
+        
+        data = request.json
+        movie = Movie(
+            title=data['title'],
+            description=data.get('description', ''),
+            poster_url=data.get('poster_url', ''),
+            video_url=data.get('video_url', ''),
+            telegram_file_id=data.get('telegram_file_id', '')
+        )
+        
+        db.session.add(movie)
+        db.session.commit()
+        
+        # Auto-create story for new movie
+        story = Story(
+            movie_id=movie.id,
+            video_url=data.get('story_video_url', ''),
+            preview_url=data.get('poster_url', '')
+        )
+        db.session.add(story)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Film va istorya qo\'shildi',
+            'movie_id': movie.id
+        })
+        
+    except Exception as e:
+        logging.error(f"Add movie error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/logout')
+def logout():
+    session.clear()
+    return jsonify({'success': True, 'message': 'Chiqish muvaffaqiyatli'})
+
+if __name__ == '__main__':
+    print("🔧 Server ishga tushmoqda...")
+    print("🌐 http://localhost:5000 manziliga boring")
+    print("👤 Admin login: Shodiyor1403")
+    print("🔑 Admin parol: jhfdsbibi55465")
+    app.run(debug=True, host='0.0.0.0', port=5000)
